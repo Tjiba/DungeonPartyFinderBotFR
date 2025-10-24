@@ -1,0 +1,4 @@
+node_modules/
+.env
+cata.json
+.DS_Store
