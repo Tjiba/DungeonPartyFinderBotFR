@@ -310,24 +310,48 @@ client.on("interactionCreate", async (i) => {
     return i.reply({ content: `✅ Heure personnalisée définie sur ${val}`, ephemeral: true });
   }
 
-  if (i.customId.startsWith("class_")) {
-    const p = [...partyData.values()].find((x) => x.messageId === i.message.id);
-    if (!p) return;
-    const chosen = i.customId.split("_")[1];
-    const existing = p.members.find((m) => m.id === uid);
-    if (existing) {
-      existing.class = chosen;
-      await i.update({ embeds: [createPartyEmbed(p)] });
-      return;
-    }
+  // === CLASSE ===
+if (i.customId.startsWith("class_")) {
+  const p = [...partyData.values()].find((x) => x.messageId === i.message.id);
+  if (!p) return;
 
-    if (p.members.length >= p.size)
-      return i.reply({ content: "❌ Party complète !", ephemeral: true });
+  const chosen = i.customId.split("_")[1];
+  const existing = p.members.find((m) => m.id === uid);
 
-    const cata = await getCataLevelFromName(i.member);
-    p.members.push({ id: uid, class: chosen, cata });
+  // Si déjà dans la party → juste changer de classe
+  if (existing) {
+    existing.class = chosen;
     await i.update({ embeds: [createPartyEmbed(p)] });
+    return;
   }
+
+  // Si party pleine
+  if (p.members.length >= p.size)
+    return i.reply({ content: "❌ Party complète !", ephemeral: true });
+
+  // Ajoute membre
+  const cata = await getCataLevelFromName(i.member);
+  p.members.push({ id: uid, class: chosen, cata });
+
+  // Met à jour embed
+  await i.update({ embeds: [createPartyEmbed(p)] });
+
+  // ✅ Si party complète → supprimer message de recherche et en recréer un final
+  if (p.members.length >= p.size) {
+    const chan = await client.channels.fetch(i.channelId);
+    const old = await chan.messages.fetch(p.messageId);
+    await old.delete().catch(() => {});
+
+    const tags = p.members.map((m) => `<@${m.id}>`).join(" ");
+    await chan.send({
+      content: `✅ **Party complète !**\n👥 ${tags}\n> <@${p.owner}> doit inviter tout le monde.`,
+      embeds: [createPartyEmbed(p)],
+    });
+
+    partyData.delete(p.owner);
+  }
+}
+
 
   if (i.customId === "leave_party") {
     const p = [...partyData.values()].find((x) => x.messageId === i.message.id);
