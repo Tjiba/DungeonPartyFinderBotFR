@@ -1,3 +1,17 @@
+/**
+ * Discord Dungeon Party Finder for Hypixel SkyBlock
+ * -------------------------------------------------
+ * Uses Hypixel API to fetch Catacombs level from player UUID,
+ * builds Party Finder embeds with class selection, voice option,
+ * and automatic completion handling.
+ *
+ * Modules:
+ * - discord.js : core bot functions, embeds, interactions
+ * - node-fetch : Hypixel + Mojang API requests
+ * - express : keep-alive server for hosting and alive pinging
+ * - dotenv : load TOKEN / CLIENT_ID / GUILD_ID / HYPIXEL_KEY
+ */
+
 import {
   Client,
   GatewayIntentBits,
@@ -14,35 +28,32 @@ import dotenv from "dotenv";
 import fetch from "node-fetch";
 import express from "express";
 import registerCommands from "./deploy-commands.js";
-dotenv.config();
 
+dotenv.config();
 await registerCommands();
 
+/* ---------------- CLIENT INIT ---------------- */
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
 });
 
-// === CONVERSION CATACOMBS ===
-// === CATACOMBS LVL — TABLE OFFICIELLE (NEU / Hypixel) ===
+/* ---------------- CATACOMBS LEVEL ---------------- */
+// Official XP table (NEU/Hypixel) — accurate up to level 50
 function getCataLevel(exp) {
-  // XP requise par niveau Catacombs (non cumulée)
   const perLevel = [
     50, 75, 110, 160, 230, 330, 470, 670, 950, 1340,
     1890, 2665, 3760, 5260, 7380, 10300, 14400, 20000, 27600, 38000,
     52500, 71500, 97000, 132000, 180000, 243000, 328000, 445000, 600000, 800000,
     1_065_000, 1_410_000, 1_900_000, 2_500_000, 3_300_000, 4_300_000, 5_600_000, 7_200_000, 9_200_000, 12_000_000,
-    15_000_000, 19_000_000, 24_000_000, 30_000_000, 38_000_000, 48_000_000, 60_000_000, 75_000_000, 93_000_000, 116_250_000
+    15_000_000, 19_000_000, 24_000_000, 30_000_000, 38_000_000, 48_000_000, 60_000_000, 75_000_000, 93_000_000, 116_250_000,
   ];
 
-  // cumul
   const cumulative = [0];
-  for (const xp of perLevel) cumulative.push(cumulative[cumulative.length - 1] + xp);
+  for (const xp of perLevel) cumulative.push(cumulative.at(-1) + xp);
   const total50 = cumulative.at(-1);
 
-  // Cas: joueur dépasse le total du niveau 50
   if (exp >= total50) return "50+";
 
-  // Cas normal
   for (let i = 1; i < cumulative.length; i++) {
     if (exp < cumulative[i]) {
       const prev = cumulative[i - 1];
@@ -51,64 +62,53 @@ function getCataLevel(exp) {
       return (i - 1 + frac).toFixed(2);
     }
   }
-
   return "0";
 }
 
-
-// === Récupération niveau via API HYPIXEL ===
-// === RÉCUPÉRATION NIVEAU CATACOMBS VIA API HYPIXEL ===
+/* ---------------- HYPIXEL API FETCH ---------------- */
 async function getCataLevelFromName(discordUser) {
   try {
-    // 1️⃣ Nettoyage du pseudo Discord
     const baseName =
       discordUser?.nickname?.replace(/\[.*?\]/g, "") ||
       discordUser?.user?.username ||
       "";
     const mcName = baseName.replace(/[^A-Za-z0-9_]/g, "").trim();
-
     if (!mcName) {
       console.log("⚠️ Aucun pseudo valide trouvé pour", baseName);
       return null;
     }
 
-    let uuid = null;
-
-    // 2️⃣ Conversion Mojang (pseudo → UUID)
+    // Mojang: name → UUID
     const mojangRes = await fetch(`https://api.mojang.com/users/profiles/minecraft/${mcName}`);
-    if (mojangRes.ok) {
-      const mojang = await mojangRes.json();
-      uuid = mojang.id;
-    } else {
+    if (!mojangRes.ok) {
       console.log(`⚠️ Mojang ne trouve pas ${mcName}`);
       return null;
     }
+    const mojang = await mojangRes.json();
+    const uuid = mojang.id;
 
-    // 3️⃣ Récupération du profil Hypixel
+    // Hypixel: get SkyBlock profile
     const hypixelRes = await fetch(
       `https://api.hypixel.net/v2/skyblock/profiles?key=${process.env.HYPIXEL_KEY}&uuid=${uuid}`
     );
     const hypixel = await hypixelRes.json();
-
     if (!hypixel.success || !hypixel.profiles?.length) {
       console.log(`⚠️ Aucun profil Hypixel pour ${mcName}`);
       return null;
     }
 
-    // 4️⃣ Sélection du profil actif (le plus récent, non bingo)
+    // Select most recent non-bingo profile
     const profiles = hypixel.profiles.filter((p) => p.game_mode !== "bingo");
     const activeProfile = profiles.reduce((a, b) =>
       (b.members?.[uuid]?.last_save || 0) > (a.members?.[uuid]?.last_save || 0) ? b : a
     );
 
-    // 5️⃣ Récupération de l’XP Catacombs
     const exp = activeProfile.members?.[uuid]?.dungeons?.dungeon_types?.catacombs?.experience ?? 0;
     if (exp <= 0) {
       console.log(`⚠️ Aucun XP Catacombs pour ${mcName}`);
       return null;
     }
 
-    // 6️⃣ Conversion en niveau
     const level = getCataLevel(exp);
     console.log(`✅ ${mcName}: ${exp} XP → Cata ${level}`);
     return level;
@@ -118,8 +118,7 @@ async function getCataLevelFromName(discordUser) {
   }
 }
 
-
-// === PARTIE BOT ===
+/* ---------------- PARTY LOGIC ---------------- */
 const partyData = new Map();
 
 function createPartyEmbed(p) {
@@ -132,8 +131,7 @@ function createPartyEmbed(p) {
       ? p.members.map(
           (m) =>
             `> ${m.cata ? "🏅" : "⚠️"} <@${m.id}> — ${classIcons[m.class]} **${m.class}** ${
-              m.cata ? `(Cata ${m.cata})` : "(non détecté)"
-            }`
+              m.cata ? `(Cata ${m.cata})` : "(not found)"}`
         ).join("\n")
       : "_Aucun joueur inscrit._";
 
@@ -155,12 +153,14 @@ function createPartyEmbed(p) {
       "📜 **Membres :**",
       members,
       "",
-      slotText
+      slotText,
     ].join("\n"));
 }
 
+/* ---------------- BOT EVENTS ---------------- */
 client.once("ready", () => console.log(`✅ Connecté en tant que ${client.user.tag}`));
 
+/* --- /pf command --- */
 client.on("interactionCreate", async (i) => {
   if (!i.isChatInputCommand() || i.commandName !== "pf") return;
   await i.deferReply({ ephemeral: true });
@@ -171,10 +171,12 @@ client.on("interactionCreate", async (i) => {
   await i.editReply({ content: "Choisis ton **mode de donjon** 👇", components: [modeRow] });
 });
 
+/* --- All other buttons & modals --- */
 client.on("interactionCreate", async (i) => {
   if (!i.isButton() && i.type !== InteractionType.ModalSubmit) return;
   const uid = i.user.id;
 
+  // MODE CHOICE
   if (i.customId.startsWith("mode_")) {
     const mode = i.customId.split("_")[1];
     const rows = [new ActionRowBuilder(), new ActionRowBuilder()];
@@ -188,6 +190,7 @@ client.on("interactionCreate", async (i) => {
     return i.update({ content: `Mode **${mode}** sélectionné. Choisis un floor :`, components: rows });
   }
 
+  // FLOOR CHOICE
   if (i.customId.startsWith("floor_")) {
     const [, mode, floor] = i.customId.split("_");
     const p = { owner: uid, mode, floor, size: 5, vocal: false, time: null, members: [] };
@@ -201,28 +204,22 @@ client.on("interactionCreate", async (i) => {
     return i.update({ content: `Floor **${mode} ${floor}** sélectionné ! Taille ? 👇`, components: [sizeRow] });
   }
 
+  // SIZE CHOICE
   if (i.customId.startsWith("size_")) {
-    try {
-      const [, size, owner] = i.customId.split("_");
-      if (uid !== owner)
-        return await i.reply({ content: "❌ Seul le créateur peut choisir.", ephemeral: true });
+    const [, size, owner] = i.customId.split("_");
+    if (uid !== owner)
+      return i.reply({ content: "❌ Seul le créateur peut choisir.", ephemeral: true });
+    const p = partyData.get(owner);
+    p.size = +size;
 
-      await i.deferUpdate();
-
-      const p = partyData.get(owner);
-      p.size = +size;
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`vocal_yes_${owner}`).setLabel("🎧 Avec vocale").setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId(`vocal_no_${owner}`).setLabel("🔇 Sans vocale").setStyle(ButtonStyle.Secondary)
-      );
-
-      await i.editReply({ content: "Souhaites-tu une **vocale** ?", components: [row] });
-    } catch (err) {
-      console.error("Erreur interaction size_ :", err);
-    }
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`vocal_yes_${owner}`).setLabel("🎧 Avec vocale").setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`vocal_no_${owner}`).setLabel("🔇 Sans vocale").setStyle(ButtonStyle.Secondary)
+    );
+    return i.update({ content: "Souhaites-tu une **vocale** ?", components: [row] });
   }
 
+  // VOICE CHOICE
   if (i.customId.startsWith("vocal_")) {
     const [, type, owner] = i.customId.split("_");
     const p = partyData.get(owner);
@@ -239,6 +236,7 @@ client.on("interactionCreate", async (i) => {
     return i.update({ content: "🕒 À quelle heure ?", components: [row] });
   }
 
+  // TIME CHOICE
   if (i.customId.startsWith("time_")) {
     const [, type, owner] = i.customId.split("_");
     const p = partyData.get(owner);
@@ -261,9 +259,10 @@ client.on("interactionCreate", async (i) => {
     const now = new Date();
     if (type === "30") now.setMinutes(now.getMinutes() + 30);
     if (type === "60") now.setHours(now.getHours() + 1);
-    p.time = type === "now"
-      ? "Maintenant"
-      : now.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Paris" });
+    p.time =
+      type === "now"
+        ? "Maintenant"
+        : now.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Paris" });
 
     const classRow = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId("class_Berserker").setLabel("🗡 Berserker").setStyle(ButtonStyle.Primary),
@@ -272,7 +271,6 @@ client.on("interactionCreate", async (i) => {
       new ButtonBuilder().setCustomId("class_Archer").setLabel("🏹 Archer").setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId("class_Mage").setLabel("🔥 Mage").setStyle(ButtonStyle.Danger)
     );
-
     const manageRow = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId("leave_party").setLabel("🚪 Quitter").setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId("delete_party").setLabel("🗑️ Supprimer").setStyle(ButtonStyle.Danger)
@@ -284,75 +282,51 @@ client.on("interactionCreate", async (i) => {
     return i.update({ content: "✅ Party créée !", components: [] });
   }
 
+  // CUSTOM TIME (modal)
   if (i.type === InteractionType.ModalSubmit && i.customId.startsWith("modal_time_")) {
     const [, , owner] = i.customId.split("_");
     const p = partyData.get(owner);
     if (!p) return i.reply({ content: "Erreur de party.", ephemeral: true });
     const val = i.fields.getTextInputValue("time_input");
     p.time = val;
-
-    const classRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId("class_Berserker").setLabel("🗡 Berserker").setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId("class_Tank").setLabel("🛡 Tank").setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId("class_Healer").setLabel("💚 Healer").setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId("class_Archer").setLabel("🏹 Archer").setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId("class_Mage").setLabel("🔥 Mage").setStyle(ButtonStyle.Danger)
-    );
-
-    const manageRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId("leave_party").setLabel("🚪 Quitter").setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId("delete_party").setLabel("🗑️ Supprimer").setStyle(ButtonStyle.Danger)
-    );
-
-    const embed = createPartyEmbed(p);
-    const msg = await i.channel.send({ embeds: [embed], components: [classRow, manageRow] });
-    p.messageId = msg.id;
     return i.reply({ content: `✅ Heure personnalisée définie sur ${val}`, ephemeral: true });
   }
 
-  // === CLASSE ===
-if (i.customId.startsWith("class_")) {
-  const p = [...partyData.values()].find((x) => x.messageId === i.message.id);
-  if (!p) return;
+  // CLASS SELECTION
+  if (i.customId.startsWith("class_")) {
+    const p = [...partyData.values()].find((x) => x.messageId === i.message.id);
+    if (!p) return;
+    const chosen = i.customId.split("_")[1];
+    const existing = p.members.find((m) => m.id === uid);
 
-  const chosen = i.customId.split("_")[1];
-  const existing = p.members.find((m) => m.id === uid);
+    if (existing) {
+      existing.class = chosen;
+      await i.update({ embeds: [createPartyEmbed(p)] });
+      return;
+    }
 
-  // Si déjà dans la party → juste changer de classe
-  if (existing) {
-    existing.class = chosen;
+    if (p.members.length >= p.size)
+      return i.reply({ content: "❌ Party complète !", ephemeral: true });
+
+    const cata = await getCataLevelFromName(i.member);
+    p.members.push({ id: uid, class: chosen, cata });
     await i.update({ embeds: [createPartyEmbed(p)] });
-    return;
+
+    // Party complète → message final
+    if (p.members.length >= p.size) {
+      const chan = await client.channels.fetch(i.channelId);
+      const old = await chan.messages.fetch(p.messageId);
+      await old.delete().catch(() => {});
+      const tags = p.members.map((m) => `<@${m.id}>`).join(" ");
+      await chan.send({
+        content: `✅ **Party complète !**\n👥 ${tags}\n> <@${p.owner}> doit inviter tout le monde.`,
+        embeds: [createPartyEmbed(p)],
+      });
+      partyData.delete(p.owner);
+    }
   }
 
-  // Si party pleine
-  if (p.members.length >= p.size)
-    return i.reply({ content: "❌ Party complète !", ephemeral: true });
-
-  // Ajoute membre
-  const cata = await getCataLevelFromName(i.member);
-  p.members.push({ id: uid, class: chosen, cata });
-
-  // Met à jour embed
-  await i.update({ embeds: [createPartyEmbed(p)] });
-
-  // ✅ Si party complète → supprimer message de recherche et en recréer un final
-  if (p.members.length >= p.size) {
-    const chan = await client.channels.fetch(i.channelId);
-    const old = await chan.messages.fetch(p.messageId);
-    await old.delete().catch(() => {});
-
-    const tags = p.members.map((m) => `<@${m.id}>`).join(" ");
-    await chan.send({
-      content: `✅ **Party complète !**\n👥 ${tags}\n> <@${p.owner}> doit inviter tout le monde.`,
-      embeds: [createPartyEmbed(p)],
-    });
-
-    partyData.delete(p.owner);
-  }
-}
-
-
+  // QUIT / DELETE
   if (i.customId === "leave_party") {
     const p = [...partyData.values()].find((x) => x.messageId === i.message.id);
     if (!p) return;
@@ -371,8 +345,9 @@ if (i.customId.startsWith("class_")) {
   }
 });
 
+/* ---------------- KEEP-ALIVE SERVER ---------------- */
 const app = express();
-app.get("/", (req, res) => res.send("Bot actif."));
+app.get("/", (req, res) => res.send("Bot actif"));
 app.listen(process.env.PORT || 3000, () => console.log("🌐 Keep-alive actif."));
 
 client.login(process.env.TOKEN);
